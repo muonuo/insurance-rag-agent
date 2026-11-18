@@ -1,0 +1,140 @@
+# 安心保业务栈：PostgreSQL + Milvus(向量库) + Redis(检索缓存)
+#
+# 镜像统一走轩辕镜像站 docker.xuanyuan.run 代理（Docker Hub 直连不可达），
+# 首次使用需先登录：docker login docker.xuanyuan.run
+# 换回官方源时把镜像名里的 docker.xuanyuan.run/ 前缀去掉即可。
+#
+# 启动：docker compose up -d
+# 端口：5432(pg) 19530/9091(milvus) 3000(attu) 6380(redis)
+
+services:
+  postgres:
+    image: docker.xuanyuan.run/library/postgres:16
+    container_name: mn-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-insurance}
+      POSTGRES_USER: ${POSTGRES_USER:-insurance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-insurance} -d ${POSTGRES_DB:-insurance}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+  etcd:
+    image: docker.xuanyuan.run/quay.io/coreos/etcd:v3.5.13
+    container_name: mn-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+  minio:
+    image: docker.xuanyuan.run/minio/minio:RELEASE.2024-04-18T19-09-19Z
+    container_name: mn-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+  milvus:
+    image: docker.xuanyuan.run/milvusdb/milvus:v3.0.0
+    container_name: mn-milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-me}
+    command: milvus run standalone
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+      - ./milvus/user.yaml:/milvus/configs/user.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+  attu:
+    image: docker.xuanyuan.run/zilliz/attu:v3.0.0-beta.6
+    container_name: mn-attu
+    depends_on:
+      milvus:
+        condition: service_healthy
+    environment:
+      - MILVUS_ADDRESS=milvus:19530
+    ports:
+      - "3000:3000"
+    volumes:
+      - attu-data:/data
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+  # RAG检索结果缓存（宿主6380：VM的6379已被langfuse栈占用）
+  redis:
+    image: docker.xuanyuan.run/library/redis:7
+    container_name: mn-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - insurance-net
+
+volumes:
+  postgres_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  attu-data:
+  redis_data:
+
+networks:
+  insurance-net:
+    driver: bridge

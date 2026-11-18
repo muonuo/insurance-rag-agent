@@ -1,0 +1,266 @@
+# Langfuse 自托管可观测性栈（基于官方 docker-compose.yml 模板适配）
+#
+# 与官方模板的差异（适配本项目本地环境）：
+# 1.端口避让（deploy/docker-compose.yml 已占用 3000/5432/9000/9001/9091）：
+#   langfuse-web 3000→3100 | clickhouse native 9000→9100
+#   langfuse postgres 5432→15432 | langfuse minio console 9001→9101
+# 2.变量重命名 POSTGRES_*→LF_POSTGRES_*、MINIO_ROOT_*→LF_MINIO_ROOT_*：
+#   避免与主项目 .env 中的同名变量互相污染
+# 3.去掉可选的 langfuse-ai-gateway 服务（不配 key 时本就空转）；
+#   需要时从官方模板拷回即可
+#
+# 镜像来源：Docker Hub 与 docker.langfuse.com 在本地网络直连超时，
+# 因此内置镜像统一走轩辕镜像站 docker.xuanyuan.run 代理。
+# 使用前必须先登录（用轩辕镜像官网注册的账号）：
+#   docker login docker.xuanyuan.run
+# 如需换回官方源：把 ${LF_MIRROR:-docker.xuanyuan.run}/ 前缀去掉即可
+# （官方为 docker.langfuse.com/langfuse/* 和 docker.io/*）。
+# minio 使用 cgr.dev（实测直连可达），如失效可改为
+#   ${LF_MIRROR:-docker.xuanyuan.run}/minio/minio:RELEASE.2024-04-18T19-09-19Z
+# 拉取后先验一遍关键镜像与tag存在：
+#   docker manifest inspect docker.xuanyuan.run/langfuse/langfuse:4
+#
+# 启动：docker compose -f deploy/langfuse-compose.yml up -d
+# 看板：http://localhost:3100 （首次进入注册账号并创建项目，拿 public/secret key）
+#
+# 安全提示：SALT/ENCRYPTION_KEY/NEXTAUTH_SECRET/各数据库密码保留的是官方开发默认值，
+# 仅限本机localhost使用；对外暴露前必须全部替换（生成命令见各 CHANGEME 注释）。
+name: langfuse
+
+services:
+  langfuse-worker:
+    image: ${LF_MIRROR:-docker.xuanyuan.run}/langfuse/langfuse-worker:${LANGFUSE_IMAGE_TAG:-4}
+    restart: always
+    depends_on: &langfuse-depends-on
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:3030:3030
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3100}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/postgres} # CHANGEME
+      SALT: ${SALT:-mysalt} # CHANGEME
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000} # CHANGEME: generate via `openssl rand -hex 32`
+      TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
+      LANGFUSE_MCP_BASE_URL: ${LANGFUSE_MCP_BASE_URL:-}
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_HOST: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_HOST:-}
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IPS:-}
+      LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS: ${LANGFUSE_LLM_CONNECTION_WHITELISTED_IP_SEGMENTS:-}
+      LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS: ${LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS:-}
+      LANGFUSE_WEBHOOK_ALLOWED_HOSTS: ${LANGFUSE_WEBHOOK_ALLOWED_HOSTS:-}
+      LANGFUSE_BLOB_STORAGE_ENDPOINT_ALLOWED_HOSTS: ${LANGFUSE_BLOB_STORAGE_ENDPOINT_ALLOWED_HOSTS:-}
+      LANGFUSE_EXTERNAL_MEDIA_STORAGE_ENDPOINT_ALLOWED_HOSTS: ${LANGFUSE_EXTERNAL_MEDIA_STORAGE_ENDPOINT_ALLOWED_HOSTS:-}
+      LANGFUSE_OUTBOUND_BLOCKED_IP_SEGMENTS: ${LANGFUSE_OUTBOUND_BLOCKED_IP_SEGMENTS:-}
+      CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL:-clickhouse://clickhouse:9000}
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://clickhouse:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse} # CHANGEME
+      CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED:-false}
+      CLICKHOUSE_CLUSTER_NAME: ${CLICKHOUSE_CLUSTER_NAME:-default}
+      LANGFUSE_JSON_BAD_UNICODE_ESCAPE: ${LANGFUSE_JSON_BAD_UNICODE_ESCAPE:-}
+      LANGFUSE_USE_AZURE_BLOB: ${LANGFUSE_USE_AZURE_BLOB:-false}
+      LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE: ${LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE:-false}
+      LANGFUSE_OCI_AUTH_TYPE: ${LANGFUSE_OCI_AUTH_TYPE:-workload_identity}
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LF_MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_ROOT_PASSWORD:-miniosecret} # CHANGEME
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:-http://minio:9000}
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LF_MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LF_MINIO_ROOT_PASSWORD:-miniosecret} # CHANGEME
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://minio:9000}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
+      LANGFUSE_S3_MEDIA_UPLOAD_REQUEST_TIMEOUT_MS: ${LANGFUSE_S3_MEDIA_UPLOAD_REQUEST_TIMEOUT_MS:-30000}
+      LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED: ${LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED:-false}
+      LANGFUSE_OBSERVATION_FIELD_SIZE_LIMIT_BYTES: ${LANGFUSE_OBSERVATION_FIELD_SIZE_LIMIT_BYTES:-2097152}
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: ${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-false}
+      LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_S3_BATCH_EXPORT_BUCKET:-langfuse}
+      LANGFUSE_S3_BATCH_EXPORT_PREFIX: ${LANGFUSE_S3_BATCH_EXPORT_PREFIX:-exports/}
+      LANGFUSE_S3_BATCH_EXPORT_REGION: ${LANGFUSE_S3_BATCH_EXPORT_REGION:-auto}
+      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_ENDPOINT:-http://minio:9000}
+      LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT:-http://localhost:9090}
+      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${LF_MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${LF_MINIO_ROOT_PASSWORD:-miniosecret} # CHANGEME
+      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: ${LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE:-true}
+      LANGFUSE_INGESTION_QUEUE_DELAY_MS: ${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}
+      LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: ${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_AUTH: ${REDIS_AUTH:-myredissecret} # CHANGEME
+      LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: ${LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK:-false}
+      REDIS_TLS_ENABLED: ${REDIS_TLS_ENABLED:-false}
+      REDIS_TLS_CA: ${REDIS_TLS_CA:-/certs/ca.crt}
+      REDIS_TLS_CERT: ${REDIS_TLS_CERT:-/certs/redis.crt}
+      REDIS_TLS_KEY: ${REDIS_TLS_KEY:-/certs/redis.key}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+      SMTP_CONNECTION_URL: ${SMTP_CONNECTION_URL:-}
+      LANGFUSE_CODE_EVAL_DISPATCHER: ${LANGFUSE_CODE_EVAL_DISPATCHER:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_ENDPOINT: ${LANGFUSE_CODE_EVAL_EXTERNAL_ENDPOINT:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_SIGNING_SECRET: ${LANGFUSE_CODE_EVAL_EXTERNAL_SIGNING_SECRET:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_HEADERS: ${LANGFUSE_CODE_EVAL_EXTERNAL_HEADERS:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_TIMEOUT_MS: ${LANGFUSE_CODE_EVAL_EXTERNAL_TIMEOUT_MS:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_CONNECT_TIMEOUT_MS: ${LANGFUSE_CODE_EVAL_EXTERNAL_CONNECT_TIMEOUT_MS:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_MAX_ATTEMPTS: ${LANGFUSE_CODE_EVAL_EXTERNAL_MAX_ATTEMPTS:-}
+      LANGFUSE_CODE_EVAL_EXTERNAL_LANGUAGES: ${LANGFUSE_CODE_EVAL_EXTERNAL_LANGUAGES:-}
+      LANGFUSE_IN_APP_AGENT_ENABLED: ${LANGFUSE_IN_APP_AGENT_ENABLED:-}
+      LANGFUSE_EVALUATOR_MEDIA_TRANSPORT: ${LANGFUSE_EVALUATOR_MEDIA_TRANSPORT:-}
+      LANGFUSE_EVALUATOR_MEDIA_INLINE_MAX_BYTES: ${LANGFUSE_EVALUATOR_MEDIA_INLINE_MAX_BYTES:-}
+      LANGFUSE_AI_PROVIDER: ${LANGFUSE_AI_PROVIDER:-}
+      LANGFUSE_AI_MODEL: ${LANGFUSE_AI_MODEL:-}
+      LANGFUSE_AI_SMALL_MODEL: ${LANGFUSE_AI_SMALL_MODEL:-}
+      LANGFUSE_AI_API_KEY: ${LANGFUSE_AI_API_KEY:-}
+      LANGFUSE_AI_BASE_URL: ${LANGFUSE_AI_BASE_URL:-}
+      LANGFUSE_AI_USE_RESPONSES_API: ${LANGFUSE_AI_USE_RESPONSES_API:-}
+      LANGFUSE_AI_EXTRA_HEADERS: ${LANGFUSE_AI_EXTRA_HEADERS:-}
+      LANGFUSE_AI_AWS_BEDROCK_REGION: ${LANGFUSE_AI_AWS_BEDROCK_REGION:-}
+      LANGFUSE_AI_VERTEX_LOCATION: ${LANGFUSE_AI_VERTEX_LOCATION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      LANGFUSE_AI_FEATURES_AWS_PROFILE: ${LANGFUSE_AI_FEATURES_AWS_PROFILE:-}
+      LANGFUSE_IN_APP_AGENT_AWS_PROFILE: ${LANGFUSE_IN_APP_AGENT_AWS_PROFILE:-}
+      LANGFUSE_IN_APP_AGENT_RUN_QUEUE_PROCESSING_CONCURRENCY: ${LANGFUSE_IN_APP_AGENT_RUN_QUEUE_PROCESSING_CONCURRENCY:-}
+      LANGFUSE_IN_APP_AGENT_SANDBOX_PROVIDER: ${LANGFUSE_IN_APP_AGENT_SANDBOX_PROVIDER:-}
+
+  langfuse-web:
+    image: ${LF_MIRROR:-docker.xuanyuan.run}/langfuse/langfuse:${LANGFUSE_IMAGE_TAG:-4}
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      # 官方默认3000，被本项目attu占用，改映射到3100
+      - 3100:3000
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret} # CHANGEME
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT:-http://minio:9000}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
+      LANGFUSE_MARKDOWN_RENDER_CHARACTER_LIMIT: ${LANGFUSE_MARKDOWN_RENDER_CHARACTER_LIMIT:-}
+      LANGFUSE_SKILL_MAX_BYTES: ${LANGFUSE_SKILL_MAX_BYTES:-}
+      LANGFUSE_SKILL_MAX_FILES: ${LANGFUSE_SKILL_MAX_FILES:-}
+      LANGFUSE_TRUSTED_PROXY_COUNT: ${LANGFUSE_TRUSTED_PROXY_COUNT:-}
+      LANGFUSE_DISABLE_SIGNUP_ONBOARDING: ${LANGFUSE_DISABLE_SIGNUP_ONBOARDING:-}
+      LANGFUSE_MCP_ALLOWED_HOSTS: ${LANGFUSE_MCP_ALLOWED_HOSTS:-}
+      LANGFUSE_IN_APP_AGENT_MAX_ACTIVE_RUNS_PER_USER: ${LANGFUSE_IN_APP_AGENT_MAX_ACTIVE_RUNS_PER_USER:-}
+      LANGFUSE_IN_APP_AGENT_MAX_ACTIVE_RUNS_PER_ORG: ${LANGFUSE_IN_APP_AGENT_MAX_ACTIVE_RUNS_PER_ORG:-}
+      LANGFUSE_AI_GATEWAY_SERVICE_KEY: ${LANGFUSE_AI_GATEWAY_SERVICE_KEY:-}
+      LANGFUSE_AI_GATEWAY_JWT_PRIVATE_KEY: ${LANGFUSE_AI_GATEWAY_JWT_PRIVATE_KEY:-}
+      LANGFUSE_AI_GATEWAY_PUBLIC_URL: ${LANGFUSE_AI_GATEWAY_PUBLIC_URL:-http://localhost:3031}
+      LANGFUSE_AI_GATEWAY_DEPLOYED: ${LANGFUSE_AI_GATEWAY_DEPLOYED:-}
+      LANGFUSE_AI_GATEWAY_ENABLED: ${LANGFUSE_AI_GATEWAY_ENABLED:-}
+      LANGFUSE_AI_GATEWAY_ORGANIZATION_ID_ALLOWLIST: ${LANGFUSE_AI_GATEWAY_ORGANIZATION_ID_ALLOWLIST:-}
+
+  clickhouse:
+    image: ${LF_MIRROR:-docker.xuanyuan.run}/clickhouse/clickhouse-server:26.3.62.3
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse} # CHANGEME
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - 127.0.0.1:8123:8123
+      # 官方默认9000，被本项目minio占用，改映射到9100
+      - 127.0.0.1:9100:9000
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    # create the 'langfuse' bucket before starting the service
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${LF_MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LF_MINIO_ROOT_PASSWORD:-miniosecret} # CHANGEME
+    ports:
+      - 9090:9000
+      # 官方默认9091，被本项目milvus占用，改映射到9101
+      - 127.0.0.1:9101:9001
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  redis:
+    image: ${LF_MIRROR:-docker.xuanyuan.run}/library/redis:7
+    restart: always
+    # CHANGEME: row below to secure redis password
+    command: >
+      --requirepass ${REDIS_AUTH:-myredissecret}
+      --maxmemory-policy noeviction
+    ports:
+      # 宿主机6379常被本地Redis占用；此映射仅供调试，容器间仍走redis:6379
+      - 127.0.0.1:16379:6379
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: ${LF_MIRROR:-docker.xuanyuan.run}/library/postgres:${LF_POSTGRES_VERSION:-17}
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    environment:
+      POSTGRES_USER: ${LF_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${LF_POSTGRES_PASSWORD:-postgres} # CHANGEME
+      POSTGRES_DB: ${LF_POSTGRES_DB:-postgres}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      # 官方默认5432，被本项目主库占用，改映射到15432
+      - 127.0.0.1:15432:5432
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  langfuse_postgres_data:
+    driver: local
+  langfuse_clickhouse_data:
+    driver: local
+  langfuse_clickhouse_logs:
+    driver: local
+  langfuse_minio_data:
+    driver: local
+  langfuse_redis_data:
+    driver: local

@@ -1,0 +1,25 @@
+# 独立的Redis服务：RAG检索结果缓存（L1）
+#
+# 与业务栈(docker-compose.yml)和Langfuse栈(langfuse-compose.yml)完全隔离，
+# 单独启停互不影响。镜像与langfuse栈同款，VM上已有本地缓存，秒级启动。
+#
+# 启动：docker compose -f redis-compose.yml up -d
+# 停止：docker compose -f redis-compose.yml down   （不加-v，数据卷保留）
+# 验证：docker exec mn-redis redis-cli ping        （应返回PONG）
+#
+# 端口：宿主6380 → 容器6379（宿主6379已被langfuse-redis占用）
+
+name: redis-cache
+
+services:
+  redis:
+    image: docker.xuanyuan.run/library/redis:7
+    container_name: mn-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
